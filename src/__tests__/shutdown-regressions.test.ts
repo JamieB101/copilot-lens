@@ -33,3 +33,22 @@ describe("shutdown usage regression fixtures", () => {
     expect(calls[0].timestamp).toBe(timestamp);
   });
 });
+
+
+it("keeps unrelated legacy sessions even when their model and usage totals match", () => {
+  const logs = path.join(fixture.home, ".copilot", "logs");
+  const sessions = path.join(fixture.home, ".copilot", "session-state", "session-1");
+  fs.mkdirSync(logs, { recursive: true }); fs.mkdirSync(sessions, { recursive: true });
+  fs.writeFileSync(path.join(logs, "other-session.log"), `${timestamp} [DEBUG] response (Request-ID other-request):\n${timestamp} [DEBUG] data:\n${timestamp} [DEBUG] {\n  "usage": {"prompt_tokens": 1000, "completion_tokens": 100, "total_tokens": 1100},\n  "model": "model-a"\n}\n${timestamp} [INFO] end\n`);
+  fs.writeFileSync(path.join(sessions, "events.jsonl"), JSON.stringify(shutdown()));
+  expect(getTokenUsage("copilot-cli").totals).toMatchObject({ calls: 2, total_tokens: 2200 });
+});
+it("uses the latest cumulative shutdown snapshot instead of summing repeated snapshots", () => {
+  const dir = path.join(fixture.home, ".copilot", "session-state", "session-1");
+  fs.mkdirSync(dir, { recursive: true });
+  const later = shutdown({ timestamp: "2026-01-22T18:35:17.358Z" });
+  later.data.modelMetrics["model-a"].usage.inputTokens = 2000;
+  later.data.modelMetrics["model-a"].requests.count = 2;
+  fs.writeFileSync(path.join(dir, "events.jsonl"), JSON.stringify(shutdown()) + "\n" + JSON.stringify(later));
+  expect(getTokenUsage("copilot-cli").totals).toMatchObject({ calls: 2, total_tokens: 2100 });
+});

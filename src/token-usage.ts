@@ -10,6 +10,7 @@ export interface TokenCall {
   timestamp: string;
   request_id: string;
   message_id?: string;
+  session_id?: string;
   model: string;
   source: TokenSource;
   call_count: number;
@@ -197,6 +198,7 @@ export function parseLogContent(content: string): TokenCall[] {
       timestamp: ts,
       request_id: requestId,
       message_id: typeof parsed.id === "string" ? parsed.id : undefined,
+      session_id: typeof parsed.sessionId === "string" ? parsed.sessionId : typeof parsed.session_id === "string" ? parsed.session_id : undefined,
       model,
       source: "copilot-cli",
       call_count: 1,
@@ -364,12 +366,11 @@ export function parseCopilotCliEventsJsonl(content: string): TokenCall[] {
 
     if (ev?.type !== "session.shutdown") continue;
 
-    const timestamp =
-      typeof ev.timestamp === "string"
-        ? ev.timestamp
-        : typeof ev?.data?.sessionStartTime === "number"
-          ? new Date(ev.data.sessionStartTime).toISOString()
-          : "";
+    const rawTime = typeof ev.timestamp === "string" ? ev.timestamp : ev?.data?.sessionStartTime;
+    if (typeof rawTime !== "string" && typeof rawTime !== "number") continue;
+    const date = new Date(rawTime);
+    if (!Number.isFinite(date.getTime())) continue;
+    const timestamp = date.toISOString();
 
     const modelMetrics = ev?.data?.modelMetrics;
     if (!modelMetrics || typeof modelMetrics !== "object") continue;
@@ -394,14 +395,14 @@ export function parseCopilotCliEventsJsonl(content: string): TokenCall[] {
       const prompt = input + cacheRead + cacheWrite;
       const completion = output + reasoning;
       const total = prompt + completion;
-      if (total === 0) continue;
+      if (total === 0 || ![input, output, cacheRead, cacheWrite, reasoning].every(n => Number.isFinite(n) && n >= 0)) continue;
 
       out.push({
         timestamp,
         request_id: `${ev.id || "session-shutdown"}:${rawModel}`,
         model: normalizeModelName(rawModel),
         source: "copilot-cli",
-        call_count: Math.max(1, Number(metric?.requests?.count || 1)),
+        call_count: Number.isFinite(Number(metric?.requests?.count)) ? Math.max(1, Number(metric.requests.count)) : 1,
         premium_requests: premiumRequests,
         prompt_tokens: prompt,
         completion_tokens: completion,
@@ -465,22 +466,30 @@ function collectCopilotCli(): { calls: TokenCall[]; logsScanned: number; logsDir
   const files = listLogFiles(logsDir);
   const eventFiles = listSessionEventFiles(sessionDir);
   const calls: TokenCall[] = [];
-  for (const f of files) {
-    try {
-      const content = fs.readFileSync(f, "utf-8");
-      for (const c of parseLogContent(content)) calls.push(c);
-    } catch {
-      // skip unreadable files
-    }
-  }
+  const summaries = new Map<string, Map<string, TokenCall>>();
   for (const f of eventFiles) {
     try {
-      const content = fs.readFileSync(f, "utf-8");
-      for (const c of parseCopilotCliEventsJsonl(content)) calls.push(c);
-    } catch {
-      // skip unreadable files
-    }
+      const sessionId = path.basename(path.dirname(f));
+      const latest = new Map<string, TokenCall>();
+      // Shutdown metrics are cumulative; keep the latest snapshot per model.
+      for (const c of parseCopilotCliEventsJsonl(fs.readFileSync(f, "utf-8"))) {
+        const previous = latest.get(c.model);
+        if (!previous || c.timestamp >= previous.timestamp) latest.set(c.model, c);
+      }
+      if (latest.size) summaries.set(sessionId, latest);
+    } catch { /* skip unreadable sessions */ }
   }
+  for (const f of files) {
+    try {
+      for (const c of parseLogContent(fs.readFileSync(f, "utf-8"))) {
+        const sessionId = c.session_id || path.basename(f, ".log");
+        // Suppress a legacy response only when its session AND model have
+        // an authoritative cumulative summary. Never deduplicate by totals/time.
+        if (!summaries.get(sessionId)?.has(c.model)) calls.push(c);
+      }
+    } catch { /* skip unreadable logs */ }
+  }
+  for (const models of summaries.values()) calls.push(...models.values());
   return {
     calls,
     logsScanned: files.length + eventFiles.length,

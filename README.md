@@ -80,3 +80,5 @@ Stack: Node + Express + TypeScript, vanilla frontend, Chart.js, Ink for the TUI,
 ## License
 
 MIT
+
+For Copilot CLI usage, the latest shutdown summary takes precedence for a matching session and model. Legacy responses are associated by their `sessionId`/`session_id` field or an exact session-ID log filename. Unattributed legacy logs are retained: totals or overlapping timestamps alone cannot prove that two records represent the same usage.
